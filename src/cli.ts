@@ -97,14 +97,21 @@ program
 program.command("list")
   .description("列出源会话历史列表")
   .requiredOption("--source <source>", "数据源: codex 或 claude")
+  .option("--project <name>", "按项目/文件夹筛选 (如: Campus项目)")
   .option("--workspace <path>", "筛选指定工作区路径")
   .option("--since <date>", "仅列出指定 ISO 日期之后的会话")
-  .action(async (options: { source: string; workspace?: string; since?: string }) => {
+  .option("--include-archived", "包含已归档的会话")
+  .action(async (options: { source: string; project?: string; workspace?: string; since?: string; includeArchived?: boolean }) => {
     const since = parseSince(options.since);
-    const summaries = await sourceAdapter(sourceName(options.source)).discover({ ...(options.workspace ? { workspace: options.workspace } : {}), ...(since ? { since } : {}) });
+    const summaries = await sourceAdapter(sourceName(options.source)).discover({
+      ...(options.project ? { project: options.project } : {}),
+      ...(options.workspace ? { workspace: options.workspace } : {}),
+      includeArchived: Boolean(options.includeArchived),
+      ...(since ? { since } : {}),
+    });
     if (isJson()) print({ schemaVersion: 1, conversations: summaries });
     else if (!summaries.length) print("未找到任何会话记录。");
-    else print(summaries.map((item) => `${item.id}\t${item.updatedAt}\t${item.branches}\t${item.workspace}\t${item.title}`).join("\n"));
+    else print(summaries.map((item) => `${item.id}\t${item.updatedAt}\t${item.archived ? "[已归档]" : "[活跃]"}\t📁 ${item.projectName ?? "未分类"}\t${item.title}`).join("\n"));
   });
 
 program.command("show")
@@ -159,17 +166,19 @@ cacheCommand.command("reset")
 program.command("import")
   .description("导入选定的会话记录")
   .addOption(new Option("--source <source>", "数据源: codex 或 claude"))
+  .option("--project <name>", "按项目/文件夹名称导入 (例如: Campus项目)")
   .option("--workspace <path>", "工作区路径")
   .option("--thread <id>", "会话 ID (可多次指定)", collect, [])
   .option("--all", "选择匹配的所有会话")
+  .option("--include-archived", "包含已归档的会话")
   .option("--since <date>", "仅导入指定 ISO 日期之后的记录")
   .option("--include-incomplete", "包含未完成的轮次")
   .option("--dry-run", "预演运行，不写入数据库")
   .option("--yes", "自动确认执行")
   .option("--non-interactive", "以非交互模式运行")
   .option("--no-resume", "不创建续聊会话绑定")
-  .action(async (options: { source?: string; workspace?: string; thread: string[]; all?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
-    if (!options.source || !options.workspace || (!options.all && options.thread.length === 0)) {
+  .action(async (options: { source?: string; project?: string; workspace?: string; thread: string[]; all?: boolean; includeArchived?: boolean; since?: string; includeIncomplete?: boolean; dryRun?: boolean; yes?: boolean; nonInteractive?: boolean; resume: boolean }) => {
+    if (!options.source || (!options.workspace && !options.project) || (!options.all && options.thread.length === 0)) {
       if (process.stdout.isTTY && !options.nonInteractive && !isJson()) {
         const paths = resolveTargetPaths(globalOverrides());
         const source = options.source ? sourceName(options.source) : undefined;
@@ -184,7 +193,7 @@ program.command("import")
         await instance.waitUntilExit();
         return;
       }
-      throw usageError("非交互模式导入需要指定 --source、--workspace 以及 --thread 或 --all。");
+      throw usageError("非交互模式导入需要指定 --source、(--project 或 --workspace) 以及 --thread 或 --all。");
     }
     if (options.all && options.thread.length) throw usageError("--all 和 --thread 参数互斥。");
     if (!options.dryRun && !options.yes) {
@@ -194,13 +203,19 @@ program.command("import")
     const source = sourceName(options.source);
     const adapter = sourceAdapter(source);
     const since = parseSince(options.since);
-    const summaries = await adapter.discover({ workspace: options.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) });
+    const summaries = await adapter.discover({
+      ...(options.project ? { project: options.project } : {}),
+      ...(options.workspace ? { workspace: options.workspace } : {}),
+      includeArchived: Boolean(options.includeArchived),
+      ...(since ? { since } : {}),
+      ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}),
+    });
     const selected: SourceSummary[] = options.all ? summaries : options.thread.map((id) => {
       const summary = summaries.find((item) => item.id === id);
-      if (!summary) throw usageError(`工作区内未找到指定会话: ${id}`);
+      if (!summary) throw usageError(`未找到指定会话: ${id}`);
       return summary;
     });
-    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: options.workspace!, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
+    const loaded = await Promise.all(selected.map(async (summary) => ({ conversation: await adapter.load(summary, { workspace: summary.workspace, ...(since ? { since } : {}), ...(options.includeIncomplete !== undefined ? { includeIncomplete: options.includeIncomplete } : {}) }), resume: options.resume })));
     const paths = resolveTargetPaths(globalOverrides());
     const result: ImportRunResult = await importConversations(loaded, paths, { ...globalOverrides(), dryRun: Boolean(options.dryRun), resume: options.resume });
     await attachCacheReset(result, paths, result.results.some((item) => item.status === "imported"));

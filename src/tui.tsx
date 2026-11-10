@@ -42,8 +42,9 @@ interface TuiProps {
 
 export function helpTextForScreen(screen: Screen, searching = false): string | undefined {
   if (searching) return "输入关键字搜索  Backspace 删除  Enter 确认  Esc 取消";
-  if (screen === "threads") return "↑/↓ 或 j/k 移动  空格 选择/取消  a 全选  / 搜索  Enter 继续  Esc 切换工作区/返回  q 退出";
-  if (screen === "source" || screen === "workspace" || screen === "provider") return "↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出";
+  if (screen === "threads") return "↑/↓ 或 j/k 移动  空格 选择/取消  a 全选  h 展开/折叠归档  / 搜索  v 切换显示模式  Enter 继续  Esc 返回  q 退出";
+  if (screen === "workspace") return "↑/↓ 或 j/k 移动  Enter 选择  Tab 切换分组模式  Esc 返回/退出  q 退出";
+  if (screen === "source" || screen === "provider") return "↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出";
   if (screen === "review") return "Enter 确认执行  Esc 返回  q 退出";
   if (screen === "result") return "↑/↓ 或 j/k 移动  Enter 确认  q 退出";
   return undefined;
@@ -157,6 +158,10 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
   const [source, setSource] = useState<SourceName>(initialSource ?? "codex");
   const [summaries, setSummaries] = useState<SourceSummary[]>([]);
   const [workspace, setWorkspace] = useState<string>();
+  const [selectedProject, setSelectedProject] = useState<string>();
+  const [groupByProject, setGroupByProject] = useState(true);
+  const [showArchived, setShowArchived] = useState(false);
+  const [displayMode, setDisplayMode] = useState<"name" | "detail" | "path">("name");
   const [provider, setProvider] = useState<string | undefined>(initialProvider);
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState(new Set<string>());
@@ -183,12 +188,79 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     setIndex(0);
   }, [screen]);
 
-  const workspaces = useMemo(() => [...new Map(summaries.map((summary) => [summary.workspace.toLowerCase(), summary.workspace])).values()], [summaries]);
+  interface GroupOption {
+    key: string;
+    name: string;
+    workspace: string;
+    isProject: boolean;
+    label: string;
+  }
+
+  const groups = useMemo<GroupOption[]>(() => {
+    if (source === "codex" && groupByProject) {
+      const byProject = new Map<string, { active: number; archived: number; workspace: string }>();
+      for (const summary of summaries) {
+        const proj = summary.projectName || "未分类会话";
+        if (!byProject.has(proj)) {
+          byProject.set(proj, { active: 0, archived: 0, workspace: summary.workspace });
+        }
+        const stat = byProject.get(proj)!;
+        if (summary.archived) stat.archived += 1;
+        else stat.active += 1;
+      }
+      const list: GroupOption[] = [];
+      for (const [name, stat] of byProject.entries()) {
+        const total = stat.active + stat.archived;
+        const archivedNote = stat.archived > 0 ? ` · ${stat.active} 活跃, ${stat.archived} 归档` : "";
+        list.push({
+          key: `proj:${name}`,
+          name,
+          workspace: stat.workspace,
+          isProject: true,
+          label: `${name === "未分类会话" ? "📂" : "📁"} ${name} (${total} 个会话${archivedNote})`,
+        });
+      }
+      list.sort((a, b) => {
+        if (a.name === "未分类会话") return 1;
+        if (b.name === "未分类会话") return -1;
+        return a.name.localeCompare(b.name, "zh");
+      });
+      return list;
+    }
+    const byWorkspace = new Map<string, { count: number; workspace: string }>();
+    for (const summary of summaries) {
+      const key = summary.workspace.toLowerCase();
+      if (!byWorkspace.has(key)) byWorkspace.set(key, { count: 0, workspace: summary.workspace });
+      byWorkspace.get(key)!.count += 1;
+    }
+    return [...byWorkspace.values()].map((item) => ({
+      key: `ws:${item.workspace}`,
+      name: item.workspace,
+      workspace: item.workspace,
+      isProject: false,
+      label: `📂 ${item.workspace} (${item.count} 个会话)`,
+    }));
+  }, [groupByProject, source, summaries]);
+
+  const workspaces = useMemo(() => groups.map((g) => g.label), [groups]);
   const providers = useMemo(() => listProviderInstances(paths, source), [paths, source]);
-  const visibleThreads = useMemo(() => summaries
-    .filter((summary) => !workspace || summary.workspace.toLowerCase() === workspace.toLowerCase())
+
+  const currentGroupThreads = useMemo(() => {
+    return summaries.filter((summary) => {
+      if (selectedProject) return summary.projectName === selectedProject;
+      return !workspace || summary.workspace.toLowerCase() === workspace.toLowerCase();
+    });
+  }, [selectedProject, summaries, workspace]);
+
+  const currentGroupArchivedCount = useMemo(() => {
+    return currentGroupThreads.filter((t) => t.archived).length;
+  }, [currentGroupThreads]);
+
+  const visibleThreads = useMemo(() => currentGroupThreads
+    .filter((summary) => showArchived || !summary.archived)
     .filter((summary) => mode !== "replace" || !replacePreviews.has(summary.id) || replacePreviews.get(summary.id)?.previouslyImported)
-    .filter((summary) => !query || summary.title.toLowerCase().includes(query.toLowerCase()) || summary.id.includes(query)), [mode, query, replacePreviews, summaries, workspace]);
+    .filter((summary) => !query || summary.title.toLowerCase().includes(query.toLowerCase()) || summary.id.includes(query)),
+    [currentGroupThreads, mode, query, replacePreviews, showArchived]);
   const operationFor = useCallback((summary: SourceSummary): "replace" | "regular" | undefined => {
     const preview = syncPreviews.get(summary.id);
     const replacement = replacePreviews.get(summary.id);
@@ -272,9 +344,9 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
   }, [screen, source]);
 
   useEffect(() => {
-    if (screen !== "threads" || !workspace) return;
+    if (screen !== "threads" || (!workspace && !selectedProject)) return;
     let cancelled = false;
-    const items = summaries.filter((summary) => summary.workspace.toLowerCase() === workspace.toLowerCase());
+    const items = currentGroupThreads;
     const queue = [...items];
     setPendingStatuses(items.length);
     setSelected(new Set());
@@ -286,7 +358,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
         const summary = queue.shift();
         if (!summary) return;
         try {
-          const conversation = await sourceAdapter(source).load(summary, { workspace });
+          const conversation = await sourceAdapter(source).load(summary, { workspace: summary.workspace });
           const preview = mode === "replace" ? undefined : await inspectConversationSync(conversation, paths);
           const replacement = mode === "replace" || preview?.status === "history-diverged"
             ? await inspectConversationReplacement(conversation, paths)
@@ -308,7 +380,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     };
     void Promise.all(Array.from({ length: Math.min(3, items.length) }, () => worker()));
     return () => { cancelled = true; };
-  }, [mode, paths, screen, source, workspace]);
+  }, [currentGroupThreads, mode, paths, screen, selectedProject, source, workspace]);
 
   const move = (delta: number, length: number) => setIndex((current) => length === 0 ? 0 : (current + delta + length) % length);
   useInput((input, key) => {
@@ -322,11 +394,11 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     if (input === "q") { app.exit(); return; }
     if (screen === "blocked" && (input === "r" || key.return)) { checkRuntime(); return; }
     if (key.upArrow || input === "k") {
-      move(-1, screen === "source" || screen === "result" ? 2 : screen === "workspace" ? workspaces.length : screen === "provider" ? providers.length : visibleThreads.length);
+      move(-1, screen === "source" || screen === "result" ? 2 : screen === "workspace" ? groups.length : screen === "provider" ? providers.length : visibleThreads.length);
       return;
     }
     if (key.downArrow || input === "j") {
-      move(1, screen === "source" || screen === "result" ? 2 : screen === "workspace" ? workspaces.length : screen === "provider" ? providers.length : visibleThreads.length);
+      move(1, screen === "source" || screen === "result" ? 2 : screen === "workspace" ? groups.length : screen === "provider" ? providers.length : visibleThreads.length);
       return;
     }
     if (key.escape) {
@@ -341,13 +413,39 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     if (screen === "source" && key.return) {
       setSource(index === 0 ? "codex" : "claude"); setSelected(new Set()); setPreparedImports([]); setPreparedSync([]); setPreparedReplacements([]); navigate("workspace"); return;
     }
-    if (screen === "workspace" && key.return && workspaces[index]) {
-      setWorkspace(workspaces[index]); setProvider(initialProvider ?? providers[0]); navigate("threads"); return;
+    if (screen === "workspace") {
+      if (key.tab || input === "t") {
+        setGroupByProject((v) => !v);
+        setIndex(0);
+        return;
+      }
+      if (key.return && groups[index]) {
+        const g = groups[index]!;
+        if (g.isProject) {
+          setSelectedProject(g.name);
+          setWorkspace(g.workspace);
+        } else {
+          setSelectedProject(undefined);
+          setWorkspace(g.workspace);
+        }
+        setProvider(initialProvider ?? providers[0]);
+        setShowArchived(false);
+        navigate("threads");
+        return;
+      }
     }
     if (screen === "provider" && key.return && providers[index]) {
       setProvider(providers[index]); navigate(preparedImports.length ? "review" : "threads"); return;
     }
     if (screen === "threads") {
+      if (input === "v") {
+        setDisplayMode((v) => v === "name" ? "detail" : v === "detail" ? "path" : "name");
+        return;
+      }
+      if (input === "h") {
+        setShowArchived((v) => !v);
+        return;
+      }
       if (input === "/") { setSearching(true); return; }
       if (input === "a") {
         const currentOperation = visibleThreads[index] ? operationFor(visibleThreads[index]!) : undefined;
@@ -427,10 +525,25 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
       {screen === "preflight" && <Text>正在检测 T3 Code 运行状态…</Text>}
       {screen === "blocked" && <><Text bold color="red">检测到 T3 Code 正在运行</Text><Text>在执行导入、同步或替换之前，请先完全退出 T3 客户端{runtime?.pid ? ` (检测到 PID ${runtime.pid})` : ""}。</Text>{runtime?.origin ? <Text dimColor>运行端口：{runtime.origin}</Text> : null}<Text>关闭 T3 后，按 r 或 Enter 重新检测，按 q 退出。</Text></>}
       {screen === "source" && <><Text bold>选择会话来源</Text><Menu items={["Codex", "Claude Code"]} index={index} /></>}
-      {screen === "workspace" && <><Text bold>选择工作区 (Workspace)</Text>{summaries.length === 0 ? <Text>正在扫描 {source} 历史会话…</Text> : <Menu items={workspaces} index={index} />}</>}
+      {screen === "workspace" && <>
+        <Text bold>选择会话分组 ({source === "codex" ? (groupByProject ? "项目文件夹模式 · 按 Tab 切换物理路径" : "物理路径模式 · 按 Tab 切换项目文件夹") : "工作区 Workspace"})</Text>
+        {summaries.length === 0 ? <Text>正在扫描 {source} 历史会话…</Text> : <Menu items={workspaces} index={index} />}
+      </>}
       {screen === "provider" && <><Text bold>选择目标 T3 Provider 实例</Text><Menu items={providers} index={index} /></>}
       {screen === "threads" && <>
-        <Text bold>{mode === "sync" ? "选择要同步的会话" : mode === "replace" ? "选择要替换的会话" : "选择要导入的会话"} — {workspace}</Text>
+        <Text bold>{mode === "sync" ? "选择要同步的会话" : mode === "replace" ? "选择要替换的会话" : "选择要导入的会话"} — 📁 {selectedProject ?? workspace}</Text>
+        <Box flexDirection="row">
+          <Text dimColor>显示模式：{displayMode === "name" ? "大标题（默认）" : displayMode === "detail" ? "详细时间" : "物理路径"} (按 'v' 切换)</Text>
+          {currentGroupArchivedCount > 0 ? (
+            <Box marginLeft={2}>
+              <Text color={showArchived ? "gray" : "yellow"}>
+                {showArchived
+                  ? `📁 [已展开归档会话 · 按 'h' 键折叠已归档 (${currentGroupArchivedCount} 个)]`
+                  : `📁 [已折叠 ${currentGroupArchivedCount} 个已归档会话 · 按 'h' 键展开]`}
+              </Text>
+            </Box>
+          ) : null}
+        </Box>
         {searching || query ? <Text color="yellow">搜索：{query}<Text dimColor>_</Text></Text> : null}
         <Menu items={visibleThreads.map((item) => {
           const syncText = conversationStatusText(syncPreviews.get(item.id), checkingStatuses);
@@ -440,17 +553,25 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
             : syncPreviews.get(item.id)?.status === "history-diverged" && replacement?.selectable
               ? "历史已变更 · 支持替换"
               : syncText;
-          return `${item.title}  [${status}]`;
+          const archivedTag = item.archived ? "[已归档] " : "";
+          let label = item.title;
+          if (displayMode === "detail") {
+            const time = item.updatedAt ? item.updatedAt.slice(5, 16).replace("T", " ") : "";
+            label = `${item.title} (${time})`;
+          } else if (displayMode === "path") {
+            label = `${item.title} [${item.workspace}]`;
+          }
+          return `${archivedTag}${label}  [${status}]`;
         })} index={index} selected={selectedVisible} disabled={disabledVisible} />
         {pendingStatuses > 0 ? <Text dimColor>正在比对状态（剩余 {pendingStatuses} 个会话）…</Text> : null}
         {visibleThreads.length === 0 && <Text color="yellow">没有找到匹配的会话记录。</Text>}
       </>}
       {screen === "review" && <>
         {preparedReplacements.length ? <>
-          <ReplacementReview workspace={workspace} selections={preparedReplacements} previews={replacePreviews} counts={replacementPreview} resetCache={resetCache} />
+          <ReplacementReview workspace={selectedProject ?? workspace} selections={preparedReplacements} previews={replacePreviews} counts={replacementPreview} resetCache={resetCache} />
         </> : <>
           <Text bold>确认导入变更</Text>
-          <Text>来源：{source} · 工作区：{workspace}</Text>
+          <Text>来源：{source} · 分组/项目：{selectedProject ?? workspace}</Text>
           <Text>新增任务数：{importPreview.tasks} · 同步任务数：{syncPreview.tasks}</Text>
           <Text>导入轮次：{importPreview.turns} · 新增轮次：{syncPreview.turns} · 采纳轮次：{syncPreview.adopted}</Text>
           <Text>消息总数：{importPreview.messages} · 工具行为：{importPreview.activities} · 附件图片：{importPreview.attachments}</Text>
