@@ -78,7 +78,7 @@ async function attachCacheReset<T extends ImportRunResult | SyncRunResult | Repl
 
 program
   .name("t3-import")
-  .description("将 Codex 和 Claude Code 的会话记录导入、同步并安全替换至 T3 Code 中")
+  .description("将 Codex 和 Claude Code 的会话记录导入、同步并安全替换至 T3 Code 中（Erico：中文汉化）")
   .version(IMPORTER_VERSION)
   .option("--t3-home <path>", "T3 安装/数据根目录 (默认 ~/.t3)")
   .option("--db <path>", "T3 数据库文件路径 (默认 ~/.t3/userdata/statev2.sqlite)")

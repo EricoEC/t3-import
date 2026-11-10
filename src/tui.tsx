@@ -42,7 +42,7 @@ interface TuiProps {
 
 export function helpTextForScreen(screen: Screen, searching = false): string | undefined {
   if (searching) return "输入关键字搜索  Backspace 删除  Enter 确认  Esc 取消";
-  if (screen === "threads") return "↑/↓ 或 j/k 移动  空格 选择/取消  a 全选  / 搜索  Enter 继续  Esc 返回/退出  q 退出";
+  if (screen === "threads") return "↑/↓ 或 j/k 移动  空格 选择/取消  a 全选  / 搜索  Enter 继续  Esc 切换工作区/返回  q 退出";
   if (screen === "source" || screen === "workspace" || screen === "provider") return "↑/↓ 或 j/k 移动  Enter 选择  Esc 返回/退出  q 退出";
   if (screen === "review") return "Enter 确认执行  Esc 返回  q 退出";
   if (screen === "result") return "↑/↓ 或 j/k 移动  Enter 确认  q 退出";
@@ -245,7 +245,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     inspectRuntime(paths)
       .then((state) => {
         setRuntime(state);
-        setScreen(state.live ? "blocked" : initialSource ? "workspace" : "source");
+        setScreen(state.live ? "blocked" : (initialWorkspace ? "threads" : initialSource ? "workspace" : "source"));
       })
       .catch((cause) => {
         setError(`Unable to check T3 runtime: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -260,15 +260,13 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     setIndex(0);
     sourceAdapter(source).discover({}).then((items) => {
       setSummaries(items);
-      const selectedWorkspace = initialWorkspace
-        ? items.find((item) => item.workspace.toLowerCase() === initialWorkspace.toLowerCase())?.workspace
-        : inferCurrentWorkspace(items);
-      if (selectedWorkspace) {
-        setWorkspace(selectedWorkspace);
-        setProvider(initialProvider ?? providers[0]);
-        // Workspace inference bypasses the workspace option screen, so it is
-        // deliberately not added to navigation history.
-        setScreen("threads");
+      if (initialWorkspace) {
+        const selected = items.find((item) => item.workspace.toLowerCase() === initialWorkspace.toLowerCase())?.workspace;
+        if (selected) {
+          setWorkspace(selected);
+          setProvider(initialProvider ?? providers[0]);
+          setScreen("threads");
+        }
       }
     }).catch((cause) => { setError(cause instanceof Error ? cause.message : String(cause)); setScreen("error"); });
   }, [screen, source]);
@@ -423,7 +421,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
   });
 
   return <Box flexDirection="column" paddingX={1}>
-    <Text bold color="cyan">t3-import · T3 Code 对话导入工具</Text>
+    <Text bold color="cyan">t3-import · T3 Code 对话导入工具 <Text dimColor>（Erico：中文汉化）</Text></Text>
     <Text dimColor>目标数据库：{paths.dbPath}</Text>
     <Box marginTop={1} flexDirection="column">
       {screen === "preflight" && <Text>正在检测 T3 Code 运行状态…</Text>}
@@ -481,5 +479,6 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
       {screen === "error" && <><Text bold color="red">执行失败</Text><Text>{error}</Text><Text dimColor>按 Enter 键退出。</Text></>}
     </Box>
     {helpTextForScreen(screen, searching) ? <Box marginTop={1}><Help screen={screen} searching={searching} /></Box> : null}
+    <Box marginTop={1}><Text dimColor>原作者: CarlosGtrz · 本地适配与中文汉化: Erico</Text></Box>
   </Box>;
 }
