@@ -17,7 +17,7 @@ import type {
 import { sourceAdapter } from "./sources/index.js";
 import { inferCurrentWorkspace } from "./sources/codex.js";
 import { compactThreadForImport, importConversations } from "./target/importer.js";
-import { inspectConversationSync, syncConversations } from "./target/sync.js";
+import { fastCheckImportedSessionIds, inspectConversationSync, syncConversations } from "./target/sync.js";
 import { listProviderInstances } from "./target/config.js";
 import { inspectRuntime, type RuntimeState } from "./target/schema.js";
 import { launchT3Code } from "./target/launch.js";
@@ -267,7 +267,9 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     if (mode === "replace") return replacement?.selectable ? "replace" : undefined;
     if (mode === "sync") return preview?.status === "syncable" ? "regular" : undefined;
     if (replacement?.selectable && preview?.status === "history-diverged") return "replace";
-    return preview?.selectable ? "regular" : undefined;
+    if (preview) return preview.selectable ? "regular" : undefined;
+    if (mode === "auto") return "regular";
+    return undefined;
   }, [mode, replacePreviews, syncPreviews]);
   const canSelect = useCallback((summary: SourceSummary) => {
     const operation = operationFor(summary);
@@ -343,19 +345,57 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
     }).catch((cause) => { setError(cause instanceof Error ? cause.message : String(cause)); setScreen("error"); });
   }, [screen, source]);
 
+  const activeGroupKey = selectedProject ? `proj:${selectedProject}` : workspace ? `ws:${workspace}` : "";
+
   useEffect(() => {
-    if (screen !== "threads" || (!workspace && !selectedProject)) return;
+    if (screen !== "threads" || !activeGroupKey) return;
     let cancelled = false;
-    const items = currentGroupThreads;
-    const queue = [...items];
-    setPendingStatuses(items.length);
+
+    let importedSet = new Set<string>();
+    try {
+      importedSet = fastCheckImportedSessionIds(paths, source);
+    } catch {}
+
+    const items = summaries.filter((summary) => {
+      if (selectedProject) return summary.projectName === selectedProject;
+      return !workspace || summary.workspace.toLowerCase() === workspace.toLowerCase();
+    });
+
+    const initialPreviews = new Map<string, ConversationSyncPreview>();
+    const queueToReconcile: SourceSummary[] = [];
+
+    for (const item of items) {
+      if (!importedSet.has(item.id)) {
+        initialPreviews.set(item.id, {
+          sourceId: item.id,
+          status: "new",
+          newTurns: 0,
+          newCompletedTurns: 0,
+          newInterruptedTurns: 0,
+          newFailedTurns: 0,
+          ignoredActiveTurns: 0,
+          adoptedTurns: 0,
+          titleChanged: false,
+          selectable: true,
+          previouslyImported: false,
+          warnings: [],
+        });
+      } else {
+        queueToReconcile.push(item);
+      }
+    }
+
+    setSyncPreviews(initialPreviews);
+    setPendingStatuses(queueToReconcile.length);
     setSelected(new Set());
     setConversations(new Map());
-    setSyncPreviews(new Map());
     setReplacePreviews(new Map());
+
+    if (queueToReconcile.length === 0) return;
+
     const worker = async () => {
       while (!cancelled) {
-        const summary = queue.shift();
+        const summary = queueToReconcile.shift();
         if (!summary) return;
         try {
           const conversation = await sourceAdapter(source).load(summary, { workspace: summary.workspace });
@@ -367,20 +407,15 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
           setConversations((current) => new Map(current).set(summary.id, conversation));
           if (preview) setSyncPreviews((current) => new Map(current).set(summary.id, preview));
           if (replacement) setReplacePreviews((current) => new Map(current).set(summary.id, replacement));
-          setSummaries((current) => current.map((item) => item.id === summary.id
-            ? { ...item, title: conversation.summary.title, updatedAt: conversation.summary.updatedAt, status: conversation.summary.status }
-            : item));
         } catch {
-          // A failed row remains visible as unavailable; other conversations
-          // continue reconciling and can still be selected.
         } finally {
           if (!cancelled) setPendingStatuses((count) => Math.max(0, count - 1));
         }
       }
     };
-    void Promise.all(Array.from({ length: Math.min(3, items.length) }, () => worker()));
+    void Promise.all(Array.from({ length: Math.min(2, queueToReconcile.length) }, () => worker()));
     return () => { cancelled = true; };
-  }, [currentGroupThreads, mode, paths, screen, selectedProject, source, workspace]);
+  }, [activeGroupKey, mode, paths, screen, source]);
 
   const move = (delta: number, length: number) => setIndex((current) => length === 0 ? 0 : (current + delta + length) % length);
   useInput((input, key) => {
@@ -462,19 +497,33 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
       }
       if (key.return && selected.size > 0) {
         const chosen = summaries.filter((summary) => selected.has(summary.id));
-        const imports: ImportSelection[] = [];
-        const syncs: SyncSelection[] = [];
-        const replacements: ReplaceSelection[] = [];
-        for (const summary of chosen) {
-          const conversation = conversations.get(summary.id);
-          const preview = syncPreviews.get(summary.id);
-          if (!conversation) continue;
-          if (operationFor(summary) === "replace") replacements.push({ conversation });
-          else if (preview?.status === "new" && mode === "auto") imports.push({ conversation, resume: true });
-          else if (preview?.status === "syncable") syncs.push({ conversation });
-        }
-        setPreparedImports(imports); setPreparedSync(syncs); setPreparedReplacements(replacements);
-        navigate(imports.length > 0 && !initialProvider && providers.length > 1 ? "provider" : "review");
+        setScreen("running");
+        const prepareAndProceed = async () => {
+          const loadedChosen: Array<{ summary: SourceSummary; conversation: CanonicalConversation }> = [];
+          for (const summary of chosen) {
+            let conv = conversations.get(summary.id);
+            if (!conv) {
+              conv = await sourceAdapter(source).load(summary, { workspace: summary.workspace });
+              setConversations((current) => new Map(current).set(summary.id, conv!));
+            }
+            loadedChosen.push({ summary, conversation: conv });
+          }
+          const imports: ImportSelection[] = [];
+          const syncs: SyncSelection[] = [];
+          const replacements: ReplaceSelection[] = [];
+          for (const { summary, conversation } of loadedChosen) {
+            const preview = syncPreviews.get(summary.id);
+            if (operationFor(summary) === "replace") replacements.push({ conversation });
+            else if (preview?.status === "syncable") syncs.push({ conversation });
+            else imports.push({ conversation, resume: true });
+          }
+          setPreparedImports(imports); setPreparedSync(syncs); setPreparedReplacements(replacements);
+          navigate(imports.length > 0 && !initialProvider && providers.length > 1 ? "provider" : "review");
+        };
+        prepareAndProceed().catch((cause) => {
+          setError(cause instanceof Error ? cause.message : String(cause));
+          setScreen("error");
+        });
         return;
       }
     }
@@ -582,7 +631,7 @@ export function ImportTui({ paths, initialSource, initialWorkspace, initialProvi
           <Text bold>按 Enter 开始执行导入，按 Esc 返回上一步。</Text>
         </>}
       </>}
-      {screen === "running" && <Text>正在备份数据库并导入会话数据，请稍候…</Text>}
+      {screen === "running" && <Text>{preparedImports.length || preparedSync.length || preparedReplacements.length ? "正在备份数据库并导入会话数据，请稍候…" : "正在加载选中的会话数据，请稍候…"}</Text>}
       {screen === "result" && (result || syncResult || replaceResult) && <>
         <Text bold color="green">✔ 操作完成！</Text>
         {result ? <Text>导入备份文件：{result.backup ?? "无需备份"}</Text> : null}

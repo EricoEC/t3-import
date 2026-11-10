@@ -724,7 +724,9 @@ export class CodexSource implements SourceAdapter {
       const fileStat = await stat(summary.path);
       const snapshot = await readStableJsonl(summary.path);
       let appThread: Record<string, unknown> | null = this.appMetadata.get(summary.id)?.raw ?? null;
-      try { appThread = await (await this.session()).read(summary.id) ?? appThread; } catch { /* raw fallback */ }
+      if (!appThread && !summary.projectName && this.appSession !== undefined) {
+        try { appThread = await (await this.session()).read(summary.id) ?? appThread; } catch { /* raw fallback */ }
+      }
       const thread = parseRows(snapshot.rows, summary.path, fileStat.mtime.toISOString(), options.includeIncomplete ?? false, appThread);
       if (!stringValue(appThread?.name)) thread.title = summary.title;
       thread.projectName = summary.projectName;
