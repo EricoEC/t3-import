@@ -1,6 +1,6 @@
 {
   "name": "t3-import",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Import, synchronize, and safely replace Codex and Claude Code conversations in T3 Code (with Chinese localization, project folders, and target selection)",
   "keywords": [
     "t3code",
